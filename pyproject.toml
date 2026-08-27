@@ -1,0 +1,32 @@
+[project]
+name = "gemini-demo"
+version = "0.1.0"
+description = "Test Gemini proxy multimodal audio lyric transcription formats."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+gemini-demo = "gemini_demo.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+cache-dir = ".uv-cache"
+
+[tool.uv.build-backend]
+module-name = "gemini_demo"
+module-root = "src"
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+testpaths = ["test"]
+markers = [
+    "integration: calls the configured remote API",
+]
