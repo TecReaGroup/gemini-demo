@@ -1,50 +1,72 @@
 # Gemini Demo
 
-`gemini-demo` 用于验证 OpenAI 兼容中转站的 Gemini 多模态输入能力。当前项目聚焦于把本地音频以内联 Base64 的方式随请求发送给 `gemini-3.1-pro-preview`，并让模型识别歌曲歌词。
+`gemini-demo` 通过 OpenAI 兼容的聊天补全接口，把本地音频以 Base64 Data URI 放进多模态 `messages[].content`，调用 Gemini 生成带时间戳的歌词。
 
-本项目不依赖中转站的文件上传接口。音频读取后会被编码为 Base64，再作为 JSON 请求体的一部分发送。这样可以兼容只暴露聊天补全端点、没有独立 Files API 的中转站。
+当前项目针对 `https://api.shuaiapi.com` 的可用配置是：
 
-## 实测结论
-
-测试环境：
-
-- 测试日期：2026-08-27
-- 中转站：由 `.env` 中的 `url` 配置
 - 模型：`gemini-3.1-pro-preview`
-- 测试音频：`data/audio/一生爱你.m4a`
-- MIME 类型：`audio/mp4`
+- 端点：`/v1/chat/completions`
+- 策略：`image-url`
+- 媒体类型：`image_url` 内容块，URL 值为 `data:audio/...;base64,...`
 
-| 策略 | 请求端点 | 实测结果 | 项目用途 |
-| --- | --- | --- | --- |
-| `image-url` | `/v1/chat/completions` | 成功识别歌词 | 当前默认主方案 |
-| `native-inline` | `/v1beta/models/{model}:generateContent` | 成功识别歌词 | 备用方案 |
-| `input-audio` | `/v1/chat/completions` | 请求成功，但中转站没有把 M4A 音频传给模型 | 兼容性探测，不作为当前可用方案 |
+这里的 `image_url` 是中转站兼容格式。虽然字段名是 `image_url`，中转站会根据 Data URI 中的 MIME 类型将音频转发给 Gemini 多模态模型。
 
-自动模式的尝试顺序为：
+## 真实接口验证
+
+验证日期：**2026-08-27**。
+
+使用项目中的音频文件：
 
 ```text
-image-url -> native-inline -> input-audio
+data/audio/回声 Echoes.mp3
 ```
 
-主方案失败后，程序会自动尝试备用方案。只有模型真正返回歌词时才会写入输出文件；如果模型返回“未上传音频”“无法读取音频”等内容，程序会将其判断为失败并继续尝试下一种策略。
+文件大小为 6,234,378 bytes，MIME 类型为 `audio/mpeg`。
 
-## 当前主方案：`image_url` Data URI
+执行：
 
-当前默认方案使用 OpenAI 兼容的 `/v1/chat/completions` 端点，并把音频包装为 `image_url` 内容块。
+```powershell
+make run
+```
 
-虽然字段名是 `image_url`，但部分多模态中转站会统一解析其中的 Data URI，再根据 MIME 类型把内容转换为 Gemini 可接收的媒体输入。对当前中转站而言，这是已经通过真实音频测试的方案。
+真实请求日志：
 
-### 请求流程
+```text
+[2026-08-27 11:50:38 +08:00] transcription_started: model=gemini-3.1-pro-preview strategy=image-url
+[2026-08-27 11:51:55 +08:00] transcription_succeeded: strategy=image-url characters=389
+```
 
-1. 从 `data/audio/` 读取音频字节。
-2. 根据扩展名确定 MIME 类型，例如 M4A 使用 `audio/mp4`。
-3. 将音频编码为 Base64。
-4. 拼接为 `data:audio/mp4;base64,<BASE64>`。
-5. 将 Data URI 放入 `image_url.url`。
-6. 请求 `/v1/chat/completions`。
-7. 从 `choices[0].message.content` 提取歌词。
+接口返回了可解析的歌词，并生成：
 
-### image_url 请求结构
+```text
+data/lyris/回声 Echoes.lrc
+```
+
+返回内容包含例如：
+
+```text
+[00:53.00] 我们要唱 我们要叫
+[00:56.50] 直到地上如同在天上
+[01:06.50] 我们是属光明
+```
+
+这次验证证明请求确实把音频作为多模态输入发送给了模型，而不是仅发送文本提示。
+
+### 失败配置的原因
+
+此前将模型改为 `gemini-3.1-pro`，并把策略改为 `native-inline`。在本项目的中转站和音频组合下，该请求分别在 **2026-08-27 11:40:20** 和 **11:43:15** 返回 `HTTP 524`，表示上游等待超时。
+
+因此当前可用配置恢复为 `image-url + gemini-3.1-pro-preview`。`native-inline` 和 `input-audio` 仍保留为手动探测选项，但不作为默认方案。
+
+## 请求结构
+
+程序发送到：
+
+```text
+POST https://api.shuaiapi.com/v1/chat/completions
+```
+
+请求体的关键结构如下：
 
 ```json
 {
@@ -60,7 +82,7 @@ image-url -> native-inline -> input-audio
         {
           "type": "image_url",
           "image_url": {
-            "url": "data:audio/mp4;base64,<BASE64_AUDIO>"
+            "url": "data:audio/mpeg;base64,<BASE64_AUDIO>"
           }
         }
       ]
@@ -70,304 +92,136 @@ image-url -> native-inline -> input-audio
 }
 ```
 
-### 选择该方案的原因
-
-- 已使用项目中的 M4A 文件完成真实接口测试。
-- 可直接复用 OpenAI 兼容的聊天补全端点。
-- 不需要中转站实现独立 Files API。
-- MIME 类型包含在 Data URI 中，中转站可以据此识别媒体类型。
-- 同一种结构也便于中转站统一处理图片、音频、视频或 PDF 等媒体；当前项目代码实际实现和测试的输入类型为音频。
-
-## 备用方案：Gemini 原生 `inline_data`
-
-如果中转站没有正确解析 `image_url` 中的音频 Data URI，程序会尝试 Gemini 原生 `generateContent` 请求。
-
-该方案把 Base64 音频放入 `contents[].parts[].inline_data`，并通过 `mime_type` 明确声明文件类型。当前中转站已经实测能够使用该方案识别同一个 M4A 文件的歌词。
-
-### 请求端点
-
-```text
-POST /v1beta/models/gemini-3.1-pro-preview:generateContent
-```
-
-### inline_data 请求结构
-
-```json
-{
-  "contents": [
-    {
-      "role": "user",
-      "parts": [
-        {
-          "text": "请仔细聆听这首歌曲并转写完整歌词。"
-        },
-        {
-          "inline_data": {
-            "mime_type": "audio/mp4",
-            "data": "<BASE64_AUDIO>"
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-请求会同时发送以下认证头，以兼容不同的 Gemini 中转实现：
+认证头：
 
 ```text
 Authorization: Bearer <API_KEY>
-x-goog-api-key: <API_KEY>
 Content-Type: application/json
 ```
 
-### 备用方案的特点
-
-- 使用 Gemini 原生的媒体数据结构，字段语义更明确。
-- 不依赖中转站把 `image_url` 特殊转换为音频。
-- 需要中转站暴露 `/v1beta/models/{model}:generateContent`。
-- 响应结构与 OpenAI 兼容端点不同，歌词从 `candidates[0].content.parts` 中提取。
-
-## `input_audio` 兼容性探测
-
-项目仍保留 OpenAI 风格的 `input_audio` 实现，用于测试其他模型、中转站或音频格式：
-
-```json
-{
-  "type": "input_audio",
-  "input_audio": {
-    "data": "<BASE64_AUDIO>",
-    "format": "m4a"
-  }
-}
-```
-
-在当前中转站和当前 M4A 文件的组合下，请求本身返回了成功状态，但模型回复没有收到音频。因此，HTTP 200 不代表多模态文件已经被中转站正确转发。
-
-程序会检测以下类型的假成功响应并将策略标记为失败：
-
-- 忘记上传或没有上传音频
-- 无法访问或无法读取音频
-- 要求用户重新提供音频
-- 返回内容为空
-
-## 支持的音频扩展名
-
-当前代码包含以下 MIME 和格式映射：
-
-| 扩展名 | MIME 类型 | OpenAI 格式值 |
-| --- | --- | --- |
-| `.m4a` | `audio/mp4` | `m4a` |
-| `.mp3` | `audio/mpeg` | `mp3` |
-| `.wav` | `audio/wav` | `wav` |
-| `.flac` | `audio/flac` | `flac` |
-| `.ogg` | `audio/ogg` | `ogg` |
-| `.aac` | `audio/aac` | `aac` |
-
-这里的“支持”表示程序能够构造对应请求，不代表所有中转站都支持所有格式。是否可用仍应通过真实接口测试确认。
-
-## 环境要求
-
-- Python 3.12 或更高版本
-- `uv`
-- 能够访问配置的 Gemini 中转站
-- 有效的中转站 API Key
+程序会从 `choices[0].message.content` 提取模型输出，并在写文件前检查输出是否为空，或是否明确表示没有收到音频。
 
 ## 配置
 
-在项目根目录创建 `.env`：
+复制并修改项目根目录的 `.env`：
 
 ```dotenv
-url=https://api.example.com
+url=https://api.shuaiapi.com
 key=your-api-key
 ```
 
-也可以使用环境变量覆盖 `.env`：
+当前请求策略和模型写在 [config.toml](config/config.toml)：
+
+```toml
+[request]
+strategy = "image-url"
+model = "gemini-3.1-pro-preview"
+```
+
+环境变量可以覆盖本地配置：
 
 ```text
 GEMINI_BASE_URL
 GEMINI_API_KEY
 GEMINI_MODEL
+GEMINI_REQUEST_STRATEGY
 ```
 
-默认模型为：
+`.env` 包含密钥，已被 `.gitignore` 忽略，不应提交到 Git。
 
-```text
-gemini-3.1-pro-preview
-```
+## 安装与运行
 
-`.env` 已被 `.gitignore` 忽略，不应提交真实 API Key。
+安装依赖：
 
-## 安装
-
-```bash
-uv sync
-```
-
-也可以使用 Makefile：
-
-```bash
+```powershell
 make install
 ```
 
-## 使用
+把一个音频文件放到 `data/audio/`。默认目录必须只有一个音频文件，然后运行：
 
-### 自动选择可用方案
-
-将一个音频文件放到 `data/audio/`。当目录中只有一个文件时，可以直接运行：
-
-```bash
-uv run python -m gemini_demo
-```
-
-或：
-
-```bash
+```powershell
 make run
 ```
 
-程序会先使用已经实测可行的 `image-url`，失败后尝试 `native-inline`，最后再使用 `input-audio` 做兼容性探测。
+也可以显式指定文件：
 
-### 指定音频文件
-
-```bash
-uv run python -m gemini_demo "data/audio/一生爱你.m4a"
+```powershell
+uv run python -m gemini_demo "data/audio/回声 Echoes.mp3"
 ```
 
-当 `data/audio/` 中存在多个文件时，必须显式指定文件路径。
+指定请求策略：
 
-### 指定请求策略
-
-主方案：
-
-```bash
+```powershell
 uv run python -m gemini_demo --strategy image-url
-```
-
-备用方案：
-
-```bash
 uv run python -m gemini_demo --strategy native-inline
-```
-
-测试 `input_audio` 兼容性：
-
-```bash
 uv run python -m gemini_demo --strategy input-audio
 ```
 
-输出详细日志：
-
-```bash
-uv run python -m gemini_demo --verbose
-```
-
-## 输出文件
-
-识别出的歌词保存在：
+默认配置必须使用：
 
 ```text
-data/lyris/<音频名称>_<策略名称>_lyrics.txt
+image-url + gemini-3.1-pro-preview
 ```
 
-例如：
+不要把默认模型改为本中转站当前无法稳定响应的 `gemini-3.1-pro`，也不要把 `native-inline` 设为默认策略，除非已经针对当前接口重新完成真实验证。
+
+## 支持的音频格式
+
+| 扩展名 | MIME 类型 | `input_audio.format` |
+| --- | --- | --- |
+| `.mp3` | `audio/mpeg` | `mp3` |
+| `.m4a` | `audio/mp4` | `m4a` |
+| `.wav` | `audio/wav` | `wav` |
+| `.flac` | `audio/flac` | `flac` |
+| `.ogg` | `audio/ogg` | `ogg` |
+| `.aac` | `audio/aac` | `aac` |
+
+`image-url` 策略会把准确 MIME 类型写入 Data URI。音频过大或中转站网关限制请求体时，接口可能返回 `413`、`524` 或其他网关错误；这类情况应先压缩音频或拆分音频后再请求。
+
+## 输出与日志
+
+成功结果写入：
 
 ```text
-data/lyris/一生爱你_image-url_lyrics.txt
-data/lyris/一生爱你_native-inline_lyrics.txt
+data/lyris/<音频文件名>.lrc
 ```
 
-`data/lyris/` 中的生成文件会被 Git 忽略，目录通过 `.gitkeep` 保留：
-
-```gitignore
-data/lyris/*
-!data/lyris/.gitkeep
-```
-
-音频文件同样不会提交到仓库：
-
-```gitignore
-data/audio/*
-!data/audio/.gitkeep
-```
-
-## 日志
-
-日志同时输出到控制台和 `log/` 目录，文件名格式为：
+日志同时输出到控制台和：
 
 ```text
 log/log_YYYY-MM-DD.log
 ```
 
-日志行格式为：
+日志格式：
 
 ```text
 [YYYY-MM-DD HH:mm:ss +08:00] [级别] [模块] - 具体信息
 ```
 
-## 测试
-
-运行本地测试：
-
-```bash
-uv run pytest
-```
-
-或：
-
-```bash
-make test
-```
-
-默认测试不会调用远程接口。
-
-### 真实接口集成测试
-
-PowerShell：
-
-```powershell
-$env:RUN_GEMINI_INTEGRATION = "1"
-uv run pytest -m integration
-```
-
-Bash：
-
-```bash
-RUN_GEMINI_INTEGRATION=1 uv run pytest -m integration
-```
-
-集成测试会读取：
-
-- `.env` 中的中转地址和密钥
-- `data/audio/` 中的 M4A 文件
-- `image-url` 主方案
-
-测试会检查返回内容长度，并验证歌词中包含预期文本。运行该测试会产生真实 API 请求和相应费用。
-
 ## 项目结构
 
 ```text
 gemini-demo/
-├── data/
-│   ├── audio/               # 本地音频，文件被 Git 忽略
-│   └── lyris/               # 生成歌词，文件被 Git 忽略
-├── log/                     # 按日期保存运行日志
+├── config/config.toml       # 请求策略和模型
+├── data/audio/              # 输入音频，通常被 Git 忽略
+├── data/lyris/              # 生成的 LRC，通常被 Git 忽略
+├── data/prompt/lyris.md     # 歌词提示词
+├── log/                     # 持久化运行日志
 ├── src/gemini_demo/
-│   ├── cli.py               # CLI、策略回退和文件输出
-│   ├── client.py            # 请求构造、接口调用和响应解析
-│   ├── config.py            # .env 与运行配置
-│   └── logging.py           # 日志格式和持久化
-├── test/
-│   ├── test_client.py       # 请求结构和解析单元测试
-│   └── test_integration.py  # 真实中转接口测试
-├── .env                     # 本地配置，不提交
+│   ├── client.py            # 多模态请求、HTTP 调用和响应解析
+│   ├── cli.py               # 命令行和输出文件
+│   ├── config.py            # .env、TOML 和环境变量配置
+│   └── logging.py           # 控制台及文件日志
 ├── Makefile
 └── pyproject.toml
 ```
 
-## 实现位置
+## 本地检查
 
-- 多模态请求和三种策略：`src/gemini_demo/client.py`
-- 自动回退顺序：`src/gemini_demo/cli.py`
-- 音频、歌词和日志目录配置：`src/gemini_demo/config.py`
-- 真实接口测试：`test/test_integration.py`
+本项目的测试不会默认调用远程接口：
+
+```powershell
+make test
+```
+
+真实接口调用会产生费用，并且可能受中转站负载和网关超时影响。验证多模态是否真正生效，应以日志中的 `transcription_succeeded` 和生成的 `.lrc` 文件为准，而不是只看 HTTP 200。

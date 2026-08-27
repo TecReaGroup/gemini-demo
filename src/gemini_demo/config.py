@@ -13,7 +13,7 @@ DEFAULT_AUDIO_DIRECTORY = Path("data/audio")
 DEFAULT_LOG_DIRECTORY = Path("log")
 DEFAULT_LYRIC_DIRECTORY = Path("data/lyris")
 DEFAULT_LYRIC_PROMPT_PATH = Path("data/prompt/lyris.md")
-DEFAULT_MODEL = "gemini-3.1-pro"
+DEFAULT_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_REQUEST_STRATEGY = "image-url"
 DEFAULT_TIMEOUT_SECONDS = 600
 ENV_PATH = Path(".env")
@@ -45,7 +45,10 @@ class Settings:
 
         base_url = os.getenv("GEMINI_BASE_URL", file_values.get("url", "")).strip()
         api_key = os.getenv("GEMINI_API_KEY", file_values.get("key", "")).strip()
-        model = os.getenv("GEMINI_MODEL", file_values.get("model", DEFAULT_MODEL)).strip()
+        configured_model = request_section.get("model", DEFAULT_MODEL)
+        model = os.getenv(
+            "GEMINI_MODEL", file_values.get("model", str(configured_model))
+        ).strip()
         configured_strategy = request_section.get("strategy", DEFAULT_REQUEST_STRATEGY)
         request_strategy = os.getenv(
             "GEMINI_REQUEST_STRATEGY", str(configured_strategy)
