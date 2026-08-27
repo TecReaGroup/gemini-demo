@@ -1,0 +1,6 @@
+[request]
+# 请求策略可选值：
+# image-url：主方案。通过 OpenAI 兼容端点发送音频 Data URI，当前中转站已实测可用。
+# native-inline：备用方案。通过 Gemini generateContent 的 inline_data 发送音频，已实测可用。
+# input-audio：兼容性探测方案。当前中转站会忽略 M4A 音频，不建议使用。
+strategy = "image-url"
