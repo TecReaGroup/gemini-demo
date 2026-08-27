@@ -7,11 +7,17 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from gemini_demo.client import GeminiProxyClient, ProxyRequestError, RequestStrategy
+from gemini_demo.client import (
+    GeminiProxyClient,
+    ProxyRequestError,
+    RequestStrategy,
+    load_lyric_prompt,
+)
 from gemini_demo.config import (
     DEFAULT_AUDIO_DIRECTORY,
     DEFAULT_LOG_DIRECTORY,
-    DEFAULT_OUTPUT_DIRECTORY,
+    DEFAULT_LYRIC_DIRECTORY,
+    DEFAULT_LYRIC_PROMPT_PATH,
     Settings,
 )
 from gemini_demo.logging import configure_logging
@@ -61,7 +67,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = Settings.load()
         audio_path = arguments.audio or find_default_audio()
-    except (FileNotFoundError, ValueError) as exc:
+        lyric_prompt = load_lyric_prompt(DEFAULT_LYRIC_PROMPT_PATH)
+    except (OSError, ValueError) as exc:
         logger.error("configuration_failed: %s", exc)
         return 2
 
@@ -70,12 +77,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.strategy == "auto"
         else (RequestStrategy(arguments.strategy),)
     )
-    client = GeminiProxyClient(settings)
+    client = GeminiProxyClient(settings, lyric_prompt)
     logger.info(
-        "transcription_started: audio=%s bytes=%d model=%s strategies=%s",
+        "transcription_started: audio=%s bytes=%d model=%s prompt=%s strategies=%s",
         audio_path,
         audio_path.stat().st_size,
         settings.model,
+        DEFAULT_LYRIC_PROMPT_PATH,
         ",".join(strategy.value for strategy in strategies),
     )
 
@@ -87,20 +95,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.warning("strategy_failed: strategy=%s error=%s", strategy.value, exc)
             continue
 
-        DEFAULT_OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
-        output_path = DEFAULT_OUTPUT_DIRECTORY / f"{audio_path.stem}_{strategy.value}_lyrics.txt"
-        output_path.write_text(lyrics + "\n", encoding="utf-8")
+        DEFAULT_LYRIC_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        lyric_path = DEFAULT_LYRIC_DIRECTORY / f"{audio_path.stem}_{strategy.value}_lyrics.txt"
+        lyric_path.write_text(lyrics + "\n", encoding="utf-8")
         logger.info(
             "strategy_succeeded: strategy=%s characters=%d output=%s",
             strategy.value,
             len(lyrics),
-            output_path,
+            lyric_path,
         )
         print(lyrics)
         return 0
 
     logger.error("transcription_failed: no request strategy succeeded")
     return 1
+
+
+
+
+
 
 
 

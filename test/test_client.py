@@ -9,6 +9,8 @@ from gemini_demo.client import (
     audio_format,
     detect_audio_mime_type,
     extract_response_text,
+    load_lyric_prompt,
+    validate_lyric_prompt,
     validate_transcription,
 )
 from gemini_demo.config import Settings, read_env_file
@@ -27,7 +29,7 @@ def test_m4a_mime_and_format() -> None:
 
 
 def test_build_input_audio_request() -> None:
-    client = GeminiProxyClient(Settings("https://proxy.example", "secret"))
+    client = GeminiProxyClient(Settings("https://proxy.example", "secret"), "LRC PROMPT")
 
     endpoint, payload, headers = client._build_request(
         "YWJj", "audio/mp4", RequestStrategy.INPUT_AUDIO
@@ -39,11 +41,12 @@ def test_build_input_audio_request() -> None:
         "type": "input_audio",
         "input_audio": {"data": "YWJj", "format": "m4a"},
     }
+    assert payload["messages"][0]["content"][0]["text"] == "LRC PROMPT"
     assert headers["Authorization"] == "Bearer secret"
 
 
 def test_build_image_url_request() -> None:
-    client = GeminiProxyClient(Settings("https://proxy.example", "secret"))
+    client = GeminiProxyClient(Settings("https://proxy.example", "secret"), "LRC PROMPT")
 
     _, payload, _ = client._build_request("YWJj", "audio/mp4", RequestStrategy.IMAGE_URL)
 
@@ -54,13 +57,16 @@ def test_build_image_url_request() -> None:
 
 
 def test_build_native_inline_request() -> None:
-    client = GeminiProxyClient(Settings("https://proxy.example", "secret", model="gemini-test"))
+    client = GeminiProxyClient(
+        Settings("https://proxy.example", "secret", model="gemini-test"), "LRC PROMPT"
+    )
 
     endpoint, payload, headers = client._build_request(
         "YWJj", "audio/mp4", RequestStrategy.NATIVE_INLINE
     )
 
     assert endpoint == "https://proxy.example/v1beta/models/gemini-test:generateContent"
+    assert payload["contents"][0]["parts"][0]["text"] == "LRC PROMPT"
     assert payload["contents"][0]["parts"][1] == {
         "inline_data": {"mime_type": "audio/mp4", "data": "YWJj"}
     }
@@ -98,4 +104,17 @@ def test_validate_transcription_rejects_ignored_audio() -> None:
 
 def test_validate_transcription_accepts_lyrics() -> None:
     validate_transcription("亲爱的宝贵耶稣\n一生爱你")
+
+
+
+def test_load_lyric_prompt(tmp_path: Path) -> None:
+    prompt_path = tmp_path / "lyris.md"
+    prompt_path.write_text("\n# LRC prompt\n", encoding="utf-8")
+
+    assert load_lyric_prompt(prompt_path) == "# LRC prompt"
+
+
+def test_validate_lyric_prompt_rejects_empty_content() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        validate_lyric_prompt("  \n")
 

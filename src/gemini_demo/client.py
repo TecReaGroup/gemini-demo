@@ -13,14 +13,6 @@ from typing import Any
 
 from gemini_demo.config import Settings
 
-LYRIC_PROMPT = """请仔细聆听这首歌曲并转写完整歌词。
-要求：
-1. 只输出实际听到的歌词，不要总结，不要凭歌曲名称补全或猜测。
-2. 按演唱顺序分行，重复演唱的部分也要保留。
-3. 无法确认的词用 [听不清] 标记；纯音乐片段无需描述。
-4. 保持歌曲原本语言，中文使用简体字。
-"""
-
 
 class RequestStrategy(StrEnum):
     """Represent one proxy-compatible multimodal request shape."""
@@ -37,9 +29,10 @@ class ProxyRequestError(RuntimeError):
 class GeminiProxyClient:
     """Send audio to a Gemini proxy using its common request formats."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, lyric_prompt: str) -> None:
         """Create a client from validated runtime settings."""
         self._settings = settings
+        self._lyric_prompt = validate_lyric_prompt(lyric_prompt)
 
     def transcribe(self, audio_path: Path, strategy: RequestStrategy) -> str:
         """Transcribe one audio file with the selected request strategy."""
@@ -77,7 +70,7 @@ class GeminiProxyClient:
                     {
                         "role": "user",
                         "parts": [
-                            {"text": LYRIC_PROMPT},
+                            {"text": self._lyric_prompt},
                             {
                                 "inline_data": {
                                     "mime_type": mime_type,
@@ -114,7 +107,7 @@ class GeminiProxyClient:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": LYRIC_PROMPT},
+                        {"type": "text", "text": self._lyric_prompt},
                         media_block,
                     ],
                 }
@@ -235,3 +228,16 @@ def validate_transcription(lyrics: str) -> None:
         raise ProxyRequestError("The model response indicates that the audio block was ignored")
 
 
+
+
+def load_lyric_prompt(prompt_path: Path) -> str:
+    """Read and validate the lyric transcription prompt."""
+    return validate_lyric_prompt(prompt_path.read_text(encoding="utf-8-sig"))
+
+
+def validate_lyric_prompt(lyric_prompt: str) -> str:
+    """Return a normalized non-empty lyric transcription prompt."""
+    normalized_prompt = lyric_prompt.strip()
+    if not normalized_prompt:
+        raise ValueError("Lyric prompt must not be empty")
+    return normalized_prompt

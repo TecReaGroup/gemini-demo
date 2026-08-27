@@ -43,6 +43,8 @@ temp/*
 # Large local audio/model assets and generated outputs
 data/audio/*
 !data/audio/.gitkeep
+data/lyris/*
+!data/lyris/.gitkeep
 data/model/*
 !data/model/.gitkeep
 data/stem/*
@@ -60,3 +62,4 @@ data/log/*
 *.mp3
 *.wav
 *.m4a
+

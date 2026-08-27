@@ -9,7 +9,8 @@ from pathlib import Path
 DEFAULT_AUDIO_DIRECTORY = Path("data/audio")
 DEFAULT_LOG_DIRECTORY = Path("log")
 DEFAULT_MODEL = "gemini-3.1-pro-preview"
-DEFAULT_OUTPUT_DIRECTORY = Path("temp")
+DEFAULT_LYRIC_PROMPT_PATH = Path("data/prompt/lyris.md")
+DEFAULT_LYRIC_DIRECTORY = Path("data/lyris")
 DEFAULT_TIMEOUT_SECONDS = 600
 ENV_PATH = Path(".env")
 
@@ -55,3 +56,5 @@ def read_env_file(env_path: Path) -> dict[str, str]:
         name, value = line.split("=", 1)
         values[name.strip()] = value.strip().strip('"').strip("'")
     return values
+
+
