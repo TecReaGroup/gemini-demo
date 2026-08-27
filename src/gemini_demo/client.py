@@ -44,8 +44,7 @@ class GeminiProxyClient:
             mime_type=mime_type,
             strategy=strategy,
         )
-        response_payload = self._post_json(endpoint, payload, headers)
-        lyrics = extract_response_text(response_payload, strategy)
+        lyrics = self._post_stream(endpoint, payload, headers, strategy)
         normalized_lyrics = lyrics.strip()
         validate_transcription(normalized_lyrics)
         return normalized_lyrics
@@ -59,11 +58,12 @@ class GeminiProxyClient:
         authorization_headers = {
             "Authorization": f"Bearer {self._settings.api_key}",
             "Content-Type": "application/json",
+            "Accept": "text/event-stream",
         }
         if strategy is RequestStrategy.NATIVE_INLINE:
             endpoint = (
                 f"{self._settings.base_url}/v1beta/models/"
-                f"{self._settings.model}:generateContent"
+                f"{self._settings.model}:streamGenerateContent?alt=sse"
             )
             payload = {
                 "contents": [
@@ -113,39 +113,56 @@ class GeminiProxyClient:
                 }
             ],
             "temperature": 0,
+            "stream": True,
         }
         return endpoint, payload, authorization_headers
 
-    def _post_json(
+    def _post_stream(
         self,
         endpoint: str,
         payload: dict[str, Any],
         headers: dict[str, str],
-    ) -> dict[str, Any]:
+        strategy: RequestStrategy,
+    ) -> str:
         request = urllib.request.Request(
             endpoint,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers=headers,
             method="POST",
         )
+        text_fragments: list[str] = []
         try:
             with urllib.request.urlopen(
                 request, timeout=self._settings.timeout_seconds
             ) as response:
-                response_body = response.read().decode("utf-8")
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    if line == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ProxyRequestError(
+                            f"Invalid streaming JSON response: {line[:1000]}"
+                        ) from exc
+                    if not isinstance(chunk, dict):
+                        continue
+                    if "error" in chunk:
+                        raise ProxyRequestError(
+                            f"Streaming API error: {json.dumps(chunk, ensure_ascii=False)[:1000]}"
+                        )
+                    text_fragments.append(extract_stream_text(chunk, strategy))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             raise ProxyRequestError(f"HTTP {exc.code}: {error_body[:1000]}") from exc
         except urllib.error.URLError as exc:
             raise ProxyRequestError(f"Request failed: {exc.reason}") from exc
 
-        try:
-            response_payload = json.loads(response_body)
-        except json.JSONDecodeError as exc:
-            raise ProxyRequestError(f"Invalid JSON response: {response_body[:1000]}") from exc
-        if not isinstance(response_payload, dict):
-            raise ProxyRequestError("Expected a JSON object response")
-        return response_payload
+        return "".join(text_fragments)
 
 
 def detect_audio_mime_type(audio_path: Path) -> str:
@@ -187,7 +204,9 @@ def extract_response_text(
         if strategy is RequestStrategy.NATIVE_INLINE:
             parts = response_payload["candidates"][0]["content"]["parts"]
             return "\n".join(
-                part["text"] for part in parts if isinstance(part.get("text"), str)
+                part["text"]
+                for part in parts
+                if isinstance(part.get("text"), str) and not part.get("thought", False)
             )
 
         content = response_payload["choices"][0]["message"]["content"]
@@ -197,7 +216,11 @@ def extract_response_text(
             return "\n".join(
                 block["text"]
                 for block in content
-                if isinstance(block, dict) and isinstance(block.get("text"), str)
+                if (
+                    isinstance(block, dict)
+                    and isinstance(block.get("text"), str)
+                    and block.get("type") not in {"thinking", "reasoning"}
+                )
             )
     except (IndexError, KeyError, TypeError) as exc:
         raise ProxyRequestError(
@@ -206,6 +229,55 @@ def extract_response_text(
     raise ProxyRequestError(
         f"Unexpected response content: {json.dumps(response_payload, ensure_ascii=False)[:1000]}"
     )
+
+
+def extract_stream_text(
+    response_chunk: dict[str, Any], strategy: RequestStrategy
+) -> str:
+    """Extract visible text from one SSE chunk while ignoring thinking output."""
+    try:
+        if strategy is RequestStrategy.NATIVE_INLINE:
+            candidates = response_chunk.get("candidates", [])
+            if not candidates:
+                return ""
+            content = candidates[0].get("content", {})
+            if not isinstance(content, dict):
+                return ""
+            parts = content.get("parts", [])
+            return "".join(
+                part["text"]
+                for part in parts
+                if isinstance(part, dict)
+                and isinstance(part.get("text"), str)
+                and not part.get("thought", False)
+            )
+
+        choices = response_chunk.get("choices", [])
+        if not choices:
+            return ""
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return ""
+        delta = choice.get("delta", {})
+        if not isinstance(delta, dict):
+            return ""
+        content = delta.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict)
+                and isinstance(block.get("text"), str)
+                and block.get("type") not in {"thinking", "reasoning"}
+            )
+    except (IndexError, KeyError, TypeError) as exc:
+        raise ProxyRequestError(
+            "Unexpected streaming response shape: "
+            f"{json.dumps(response_chunk, ensure_ascii=False)[:1000]}"
+        ) from exc
+    return ""
 
 
 def validate_transcription(lyrics: str) -> None:
