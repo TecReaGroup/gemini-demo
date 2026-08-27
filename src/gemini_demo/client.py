@@ -112,7 +112,7 @@ class GeminiProxyClient:
                     ],
                 }
             ],
-            "temperature": 0,
+            "temperature": 1,
             "stream": True,
         }
         return endpoint, payload, authorization_headers

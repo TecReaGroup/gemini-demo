@@ -88,7 +88,7 @@ POST https://api.shuaiapi.com/v1/chat/completions
       ]
     }
   ],
-  "temperature": 0
+  "temperature": 1
 }
 ```
 
