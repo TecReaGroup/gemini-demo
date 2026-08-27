@@ -79,7 +79,8 @@ class GeminiProxyClient:
                             },
                         ],
                     }
-                ]
+                ],
+                "tools": [{"google_search": {}}],
             }
             return endpoint, payload, {
                 **authorization_headers,
