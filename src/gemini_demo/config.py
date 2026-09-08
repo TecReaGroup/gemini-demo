@@ -12,9 +12,9 @@ CONFIG_PATH = Path("config/config.toml")
 DEFAULT_AUDIO_DIRECTORY = Path("data/audio")
 DEFAULT_LOG_DIRECTORY = Path("log")
 DEFAULT_LYRIC_DIRECTORY = Path("data/lyris")
-DEFAULT_LYRIC_PROMPT_PATH = Path("data/prompt/lyris.md")
-DEFAULT_MODEL = "gemini-3.1-pro-preview"
-DEFAULT_REQUEST_STRATEGY = "image-url"
+DEFAULT_LYRIC_PROMPT_PATH = Path("config/prompt.md")
+DEFAULT_MODEL = "gemini-3.1-pro-low"
+DEFAULT_REQUEST_STRATEGY = "native-inline"
 DEFAULT_TIMEOUT_SECONDS = 600
 ENV_PATH = Path(".env")
 REQUEST_STRATEGY_CHOICES = frozenset({"image-url", "native-inline", "input-audio"})
@@ -35,6 +35,8 @@ class Settings:
         cls,
         env_path: Path = ENV_PATH,
         config_path: Path = CONFIG_PATH,
+        *,
+        request_strategy: str | None = None,
     ) -> Settings:
         """Load and validate proxy settings from TOML, environment, and a local env file."""
         file_values = read_env_file(env_path)
@@ -50,9 +52,14 @@ class Settings:
             "GEMINI_MODEL", file_values.get("model", str(configured_model))
         ).strip()
         configured_strategy = request_section.get("strategy", DEFAULT_REQUEST_STRATEGY)
-        request_strategy = os.getenv(
+        request_strategy = request_strategy or os.getenv(
             "GEMINI_REQUEST_STRATEGY", str(configured_strategy)
         ).strip()
+        timeout_seconds = request_section.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+        if type(timeout_seconds) is not int or timeout_seconds <= 0:
+            raise ValueError("request.timeout_seconds must be a positive integer")
+        if not model:
+            raise ValueError("Model must not be empty")
 
         missing_names = [
             name
@@ -72,6 +79,7 @@ class Settings:
             api_key=api_key,
             model=model,
             request_strategy=request_strategy,
+            timeout_seconds=timeout_seconds,
         )
 
 

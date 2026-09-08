@@ -11,6 +11,7 @@ from gemini_demo.client import (
     GeminiProxyClient,
     ProxyRequestError,
     RequestStrategy,
+    AUDIO_MIME_TYPES,
     load_lyric_prompt,
 )
 from gemini_demo.config import (
@@ -42,7 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def find_default_audio(audio_directory: Path = DEFAULT_AUDIO_DIRECTORY) -> Path:
     """Return the sole audio file from the default directory."""
-    audio_files = sorted(path for path in audio_directory.iterdir() if path.is_file())
+    audio_files = sorted(
+        path for path in audio_directory.iterdir()
+        if path.is_file() and path.suffix.lower() in AUDIO_MIME_TYPES
+    )
     if not audio_files:
         raise FileNotFoundError(f"No audio file found in {audio_directory}")
     if len(audio_files) > 1:
@@ -64,10 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger = configure_logging(DEFAULT_LOG_DIRECTORY, arguments.verbose)
 
     try:
-        settings = Settings.load()
+        settings = Settings.load(request_strategy=arguments.strategy)
         audio_path = arguments.audio or find_default_audio()
+        audio_size = audio_path.stat().st_size
         lyric_prompt = load_lyric_prompt(DEFAULT_LYRIC_PROMPT_PATH)
-        request_strategy = RequestStrategy(arguments.strategy or settings.request_strategy)
+        request_strategy = RequestStrategy(settings.request_strategy)
     except (OSError, ValueError) as exc:
         logger.error("configuration_failed: %s", exc)
         return 2
@@ -76,7 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger.info(
         "transcription_started: audio=%s bytes=%d model=%s prompt=%s strategy=%s",
         audio_path,
-        audio_path.stat().st_size,
+        audio_size,
         settings.model,
         DEFAULT_LYRIC_PROMPT_PATH,
         request_strategy.value,
@@ -84,15 +89,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         lyrics = client.transcribe(audio_path, request_strategy)
+        DEFAULT_LYRIC_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        lyric_path = lyric_path_for(audio_path)
+        lyric_path.write_text(lyrics + "\n", encoding="utf-8")
     except (OSError, ProxyRequestError, ValueError) as exc:
         logger.error(
             "transcription_failed: strategy=%s error=%s", request_strategy.value, exc
         )
         return 1
 
-    DEFAULT_LYRIC_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    lyric_path = lyric_path_for(audio_path)
-    lyric_path.write_text(lyrics + "\n", encoding="utf-8")
     logger.info(
         "transcription_succeeded: strategy=%s characters=%d output=%s",
         request_strategy.value,

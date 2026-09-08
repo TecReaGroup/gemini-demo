@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
-import mimetypes
+import logging
+import re
 import urllib.error
 import urllib.request
 from enum import StrEnum
@@ -12,6 +13,19 @@ from pathlib import Path
 from typing import Any
 
 from gemini_demo.config import Settings
+
+
+LOGGER = logging.getLogger(__name__)
+AUDIO_MIME_TYPES = {
+    ".aac": "audio/aac",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+}
+LRC_TIMESTAMP_PATTERN = re.compile(r"\[(\d{2}):(\d{2})\.(\d{2})\]")
+LRC_METADATA_PATTERN = re.compile(r"\[(?:ar|al|ti|by|offset|re|ve):[^\]\r\n]*\]")
 
 
 class RequestStrategy(StrEnum):
@@ -125,63 +139,78 @@ class GeminiProxyClient:
         headers: dict[str, str],
         strategy: RequestStrategy,
     ) -> str:
+        request_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             endpoint,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            data=request_data,
             headers=headers,
             method="POST",
         )
+        LOGGER.debug("Sending %d request bytes using %s", len(request_data), strategy)
         text_fragments: list[str] = []
+        finish_reason: str | None = None
+        event_lines: list[str] = []
+
+        def consume_event() -> bool:
+            nonlocal finish_reason
+            if not event_lines:
+                return False
+            data_lines = [line[5:].lstrip() for line in event_lines if line.startswith("data:")]
+            event_lines.clear()
+            if not data_lines:
+                return False
+            event_data = "\n".join(data_lines)
+            if event_data == "[DONE]":
+                return True
+            try:
+                chunk = json.loads(event_data)
+            except json.JSONDecodeError as exc:
+                raise ProxyRequestError("Invalid streaming JSON response") from exc
+            if not isinstance(chunk, dict):
+                return False
+            if "error" in chunk:
+                raise ProxyRequestError("Streaming API error")
+            text_fragments.append(extract_stream_text(chunk, strategy))
+            chunk_finish_reason = extract_finish_reason(chunk, strategy)
+            if chunk_finish_reason is not None:
+                finish_reason = chunk_finish_reason
+            log_grounding_metadata(chunk, strategy)
+            return False
+
         try:
             with urllib.request.urlopen(
                 request, timeout=self._settings.timeout_seconds
             ) as response:
                 for raw_line in response:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line or line.startswith(":"):
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not line:
+                        if consume_event():
+                            break
+                        continue
+                    if line.startswith(":") or line.startswith(("event:", "id:", "retry:")):
                         continue
                     if line.startswith("data:"):
-                        line = line[5:].strip()
-                    if line == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise ProxyRequestError(
-                            f"Invalid streaming JSON response: {line[:1000]}"
-                        ) from exc
-                    if not isinstance(chunk, dict):
-                        continue
-                    if "error" in chunk:
-                        raise ProxyRequestError(
-                            f"Streaming API error: {json.dumps(chunk, ensure_ascii=False)[:1000]}"
-                        )
-                    text_fragments.append(extract_stream_text(chunk, strategy))
+                        event_lines.append(line)
+                else:
+                    consume_event()
         except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise ProxyRequestError(f"HTTP {exc.code}: {error_body[:1000]}") from exc
+            exc.close()
+            raise ProxyRequestError(f"HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
-            raise ProxyRequestError(f"Request failed: {exc.reason}") from exc
+            raise ProxyRequestError("Request failed: network error") from exc
 
+        expected_finish_reason = "STOP" if strategy is RequestStrategy.NATIVE_INLINE else "stop"
+        if finish_reason != expected_finish_reason:
+            reason = finish_reason or "missing"
+            raise ProxyRequestError(f"Rejected incomplete transcription ({reason})")
         return "".join(text_fragments)
 
 
 def detect_audio_mime_type(audio_path: Path) -> str:
     """Resolve a Gemini-compatible MIME type from an audio file path."""
-    extension_overrides = {
-        ".aac": "audio/aac",
-        ".flac": "audio/flac",
-        ".m4a": "audio/mp4",
-        ".mp3": "audio/mpeg",
-        ".ogg": "audio/ogg",
-        ".wav": "audio/wav",
-    }
-    mime_type = extension_overrides.get(audio_path.suffix.lower())
+    mime_type = AUDIO_MIME_TYPES.get(audio_path.suffix.lower())
     if mime_type:
         return mime_type
-    guessed_type, _ = mimetypes.guess_type(audio_path.name)
-    if guessed_type and guessed_type.startswith("audio/"):
-        return guessed_type
     raise ValueError(f"Unsupported audio extension: {audio_path.suffix or '<none>'}")
 
 
@@ -195,41 +224,6 @@ def audio_format(mime_type: str) -> str:
         "audio/ogg": "ogg",
         "audio/wav": "wav",
     }[mime_type]
-
-
-def extract_response_text(
-    response_payload: dict[str, Any], strategy: RequestStrategy
-) -> str:
-    """Extract generated text from OpenAI-compatible or native Gemini JSON."""
-    try:
-        if strategy is RequestStrategy.NATIVE_INLINE:
-            parts = response_payload["candidates"][0]["content"]["parts"]
-            return "\n".join(
-                part["text"]
-                for part in parts
-                if isinstance(part.get("text"), str) and not part.get("thought", False)
-            )
-
-        content = response_payload["choices"][0]["message"]["content"]
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "\n".join(
-                block["text"]
-                for block in content
-                if (
-                    isinstance(block, dict)
-                    and isinstance(block.get("text"), str)
-                    and block.get("type") not in {"thinking", "reasoning"}
-                )
-            )
-    except (IndexError, KeyError, TypeError) as exc:
-        raise ProxyRequestError(
-            f"Unexpected response shape: {json.dumps(response_payload, ensure_ascii=False)[:1000]}"
-        ) from exc
-    raise ProxyRequestError(
-        f"Unexpected response content: {json.dumps(response_payload, ensure_ascii=False)[:1000]}"
-    )
 
 
 def extract_stream_text(
@@ -275,30 +269,69 @@ def extract_stream_text(
             )
     except (IndexError, KeyError, TypeError) as exc:
         raise ProxyRequestError(
-            "Unexpected streaming response shape: "
-            f"{json.dumps(response_chunk, ensure_ascii=False)[:1000]}"
+            "Unexpected streaming response shape"
         ) from exc
     return ""
 
 
 def validate_transcription(lyrics: str) -> None:
-    """Reject empty output and common proxy responses that ignored the audio block."""
-    if not lyrics:
-        raise ProxyRequestError("The proxy returned no transcription text")
+    """Require nonempty, ordered timestamped LRC lines or metadata tags."""
+    if not lyrics or "```" in lyrics:
+        raise ProxyRequestError("The proxy returned invalid LRC transcription")
+    previous_timestamp = -1
+    lyric_line_found = False
+    for line in lyrics.splitlines():
+        if not line.strip() or line.strip().startswith(("#", "~~~")):
+            raise ProxyRequestError("The proxy returned invalid LRC transcription")
+        metadata = LRC_METADATA_PATTERN.fullmatch(line.strip())
+        if metadata:
+            continue
+        timestamp_prefix = re.match(r"(?:\[\d{2}:\d{2}\.\d{2}\])+", line)
+        if not timestamp_prefix:
+            raise ProxyRequestError("The proxy returned invalid LRC transcription")
+        timestamps = list(LRC_TIMESTAMP_PATTERN.finditer(timestamp_prefix.group(0)))
+        if not line[timestamp_prefix.end():].strip():
+            raise ProxyRequestError("The proxy returned invalid LRC transcription")
+        lyric_line_found = True
+        for timestamp in timestamps:
+            minutes, seconds, fraction = timestamp.groups()
+            if int(seconds) >= 60:
+                raise ProxyRequestError("The proxy returned invalid LRC timestamp")
+            current_timestamp = int(minutes) * 60 * 1000 + int(seconds) * 1000 + int(fraction) * 10
+            if current_timestamp < previous_timestamp:
+                raise ProxyRequestError("The proxy returned non-ordered LRC timestamps")
+            previous_timestamp = current_timestamp
+    if not lyric_line_found:
+        raise ProxyRequestError("The proxy returned invalid LRC transcription")
 
-    missing_audio_phrases = (
-        "忘记上传",
-        "没有上传",
-        "未上传",
-        "无法访问音频",
-        "无法读取音频",
-        "provide the audio",
-        "attach the audio",
-        "no audio",
+
+def extract_finish_reason(response_chunk: dict[str, Any], strategy: RequestStrategy) -> str | None:
+    """Read the provider's terminal reason without exposing response content."""
+    if strategy is RequestStrategy.NATIVE_INLINE:
+        candidates = response_chunk.get("candidates", [])
+        return candidates[0].get("finishReason") if candidates and isinstance(candidates[0], dict) else None
+    choices = response_chunk.get("choices", [])
+    return choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None
+
+
+def log_grounding_metadata(response_chunk: dict[str, Any], strategy: RequestStrategy) -> None:
+    """Log only counts from native grounding metadata."""
+    if strategy is not RequestStrategy.NATIVE_INLINE:
+        return
+    candidates = response_chunk.get("candidates", [])
+    metadata = (
+        candidates[0].get("groundingMetadata", {})
+        if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict)
+        else {}
     )
-    normalized_text = lyrics.casefold()
-    if any(phrase in normalized_text for phrase in missing_audio_phrases):
-        raise ProxyRequestError("The model response indicates that the audio block was ignored")
+    if isinstance(metadata, dict):
+        queries = metadata.get("webSearchQueries", [])
+        sources = metadata.get("groundingChunks", [])
+        LOGGER.debug(
+            "Native grounding metadata: %d queries, %d sources",
+            len(queries) if isinstance(queries, list) else 0,
+            len(sources) if isinstance(sources, list) else 0,
+        )
 
 
 
